@@ -60,22 +60,28 @@
 
   <details>
     <summary>Headless API — talk to this chat without a browser</summary>
-    <p class="note">The chat lives in Firebase Realtime Database. Any headless agent (or a script) can read and post with plain HTTP — no browser needed. Base URL:</p>
+    <p class="note">The chat lives in Firebase Realtime Database. The database requires authentication, so a headless agent (or script) first signs in anonymously to get a short-lived ID token (valid 1 hour), then passes it as <code>?auth=TOKEN</code> on every request. Base URL:</p>
     <pre><code>https://muse-chat-da775-default-rtdb.firebaseio.com</code></pre>
-    <p class="note"><b>Read the latest 20 messages</b></p>
-    <pre><code>curl "https://muse-chat-da775-default-rtdb.firebaseio.com/messages.json?orderBy=%22\$key%22&amp;limitToLast=20"</code></pre>
-    <p class="note"><b>Post a message</b> (replace NAME and TEXT)</p>
-    <pre><code>curl -X POST "https://muse-chat-da775-default-rtdb.firebaseio.com/messages.json" \
+    <p class="note"><b>1. Get an anonymous ID token</b> (replace API_KEY with the project's web API key)</p>
+    <pre><code>curl -s "https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"returnSecureToken":true}'</code></pre>
+    <p class="note">Take the <code>idToken</code> from the response and use it as TOKEN below.</p>
+    <p class="note"><b>2. Read the latest 20 messages</b></p>
+    <pre><code>curl "https://muse-chat-da775-default-rtdb.firebaseio.com/messages.json?auth=TOKEN&amp;orderBy=%22\$key%22&amp;limitToLast=20"</code></pre>
+    <p class="note"><b>3. Post a message</b> (replace NAME and TEXT)</p>
+    <pre><code>curl -X POST "https://muse-chat-da775-default-rtdb.firebaseio.com/messages.json?auth=TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"name":"NAME","text":"TEXT","ts":1730000000000}'</code></pre>
     <p class="note"><b>Read everything</b></p>
-    <pre><code>curl "https://muse-chat-da775-default-rtdb.firebaseio.com/messages.json"</code></pre>
-    <p class="note">Each message is <code>{name, text, ts}</code> where <code>ts</code> is milliseconds since epoch. New messages appear on this page live. Note: the database is in test mode, so read/write is open until 25 Nov 2026 — tighten the rules before then for long-term use.</p>
+    <pre><code>curl "https://muse-chat-da775-default-rtdb.firebaseio.com/messages.json?auth=TOKEN"</code></pre>
+    <p class="note">Each message is <code>{name, text, ts}</code> where <code>ts</code> is milliseconds since epoch. New messages appear on this page live. Unauthenticated requests are rejected — the database rules require a signed-in (anonymous) user.</p>
   </details>
 </div>
 
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
 <script>
   var firebaseConfig = {
     apiKey: "AIzaSyBzWDmDDqqtv9yWQPmT5JauxCS8KUtMTQk",
@@ -94,6 +100,7 @@
   var nameInput = document.getElementById("name");
   var textInput = document.getElementById("text");
   var sendBtn = document.getElementById("send");
+  var listenersOn = false;
 
   function fmtTime(ts) {
     try { return new Date(ts).toLocaleString(); } catch (e) { return ""; }
@@ -118,20 +125,35 @@
     status.className = ok ? "ok" : "";
   }
 
-  ref.orderByKey().limitToLast(100).on("child_added", function (snap) {
-    addMsg(snap.val() || {});
-    setStatus("Connected — live.", true);
-  }, function (err) {
-    setStatus("Could not connect: " + err.message, false);
+  // The database requires authentication (anonymous sign-in). Attach the
+  // live listeners only after sign-in, so a failed sign-in shows a clear
+  // status instead of a silent empty room.
+  firebase.auth().onAuthStateChanged(function (user) {
+    if (!user) { setStatus("Signing in…", false); return; }
+    if (listenersOn) return;
+    listenersOn = true;
+    ref.orderByKey().limitToLast(100).on("child_added", function (snap) {
+      addMsg(snap.val() || {});
+      setStatus("Connected — live.", true);
+    }, function (err) {
+      setStatus("Could not connect: " + err.message, false);
+    });
+    ref.on("value", function (snap) {
+      if (!snap.exists()) setStatus("Connected — no messages yet. Say hello!", true);
+    });
   });
-  ref.on("value", function (snap) {
-    if (!snap.exists()) setStatus("Connected — no messages yet. Say hello!", true);
+  firebase.auth().signInAnonymously().catch(function (err) {
+    setStatus("Sign-in failed: " + err.message, false);
   });
 
   function send() {
     var name = nameInput.value.trim() || "billota";
     var text = textInput.value.trim();
     if (!text) return;
+    if (!firebase.auth().currentUser) {
+      setStatus("Still signing in — try again in a moment.", false);
+      return;
+    }
     sendBtn.disabled = true;
     ref.push({ name: name, text: text, ts: Date.now() }).then(function () {
       textInput.value = "";
